@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/go-openapi/spec"
 
 	"github.com/emicklei/go-restful/v3"
@@ -20,26 +21,27 @@ const (
 	// ExtensionPrefix is the only prefix accepted for VendorExtensible extension keys
 	ExtensionPrefix = "x-"
 
-	arrayType = "array"
+	arrayType      = "array"
 	definitionRoot = "#/definitions/"
 )
 
-func buildPaths(ws *restful.WebService, cfg Config) spec.Paths {
-	p := spec.Paths{Paths: map[string]spec.PathItem{}}
+func buildPaths(ws *restful.WebService, cfg Config) openapi3.Paths {
+	p := openapi3.Paths{}
 	for _, each := range ws.Routes() {
 		path, patterns := sanitizePath(each.Path)
-		existingPathItem, ok := p.Paths[path]
+		existingPathItem, ok := p[path]
 		if !ok {
-			existingPathItem = spec.PathItem{}
+			existingPathItem = &openapi3.PathItem{}
+			p[path] = existingPathItem
 		}
-		p.Paths[path] = buildPathItem(ws, each, existingPathItem, patterns, cfg)
+		buildPathItem(ws, each, existingPathItem, patterns, cfg)
 	}
 	return p
 }
 
 // sanitizePath removes regex expressions from named path params,
-// since openapi only supports setting the pattern as a a property named "pattern".
-// Expressions like "/api/v1/{name:[a-z]/" are converted to "/api/v1/{name}/".
+// since openapi only supports setting the pattern as a property named "pattern".
+// Expressions like "/api/v1/{name:[a-z]}/" are converted to "/api/v1/{name}/".
 // The second return value is a map which contains the mapping from the path parameter
 // name to the extracted pattern
 func sanitizePath(restfulPath string) (string, map[string]string) {
@@ -61,33 +63,16 @@ func sanitizePath(restfulPath string) (string, map[string]string) {
 	return openapiPath, patterns
 }
 
-func buildPathItem(ws *restful.WebService, r restful.Route, existingPathItem spec.PathItem, patterns map[string]string, cfg Config) spec.PathItem {
+func buildPathItem(ws *restful.WebService, r restful.Route, existingPathItem *openapi3.PathItem, patterns map[string]string, cfg Config) {
 	op := buildOperation(ws, r, patterns, cfg)
-	switch r.Method {
-	case http.MethodGet:
-		existingPathItem.Get = op
-	case http.MethodPost:
-		existingPathItem.Post = op
-	case http.MethodPut:
-		existingPathItem.Put = op
-	case http.MethodDelete:
-		existingPathItem.Delete = op
-	case http.MethodPatch:
-		existingPathItem.Patch = op
-	case http.MethodOptions:
-		existingPathItem.Options = op
-	case http.MethodHead:
-		existingPathItem.Head = op
-	}
-	return existingPathItem
+	existingPathItem.SetOperation(r.Method, op)
 }
 
-func buildOperation(ws *restful.WebService, r restful.Route, patterns map[string]string, cfg Config) *spec.Operation {
-	o := spec.NewOperation(r.Operation)
+func buildOperation(ws *restful.WebService, r restful.Route, patterns map[string]string, cfg Config) *openapi3.Operation {
+	o := openapi3.NewOperation()
+	o.OperationID = r.Operation
 	o.Description = r.Notes
 	o.Summary = stripTags(r.Doc)
-	o.Consumes = r.Consumes
-	o.Produces = r.Produces
 	o.Deprecated = r.Deprecated
 	if r.Metadata != nil {
 		if tags, ok := r.Metadata[KeyOpenAPITags]; ok {
@@ -97,7 +82,7 @@ func buildOperation(ws *restful.WebService, r restful.Route, patterns map[string
 		}
 	}
 
-	extractVendorExtensions(&o.VendorExtensible, r.ExtensionProperties)
+	extractVendorExtensions(&o.ExtensionProps, r.ExtensionProperties)
 
 	// collect any path parameters
 	for _, param := range ws.PathParameters() {
@@ -141,40 +126,60 @@ func stringAutoType(ambiguous string) interface{} {
 	return ambiguous
 }
 
-func extractVendorExtensions(extensible *spec.VendorExtensible, extensions restful.ExtensionProperties) {
+func extractVendorExtensions(extensible *openapi3.ExtensionProps, extensions restful.ExtensionProperties) {
 	if len(extensions.Extensions) > 0 {
-		for key := range extensions.Extensions {
+		for key, value := range extensions.Extensions {
 			if strings.HasPrefix(key, ExtensionPrefix) {
-				extensible.AddExtension(key, extensions.Extensions[key])
+				extensible.Extensions[key] = value
 			}
 		}
 	}
 }
 
-func buildParameter(r restful.Route, restfulParam *restful.Parameter, pattern string, cfg Config) spec.Parameter {
-	p := spec.Parameter{}
+func buildParameter(r restful.Route, restfulParam *restful.Parameter, pattern string, cfg Config) *openapi3.ParameterRef {
+	p := &openapi3.Parameter{
+		Schema: &openapi3.SchemaRef{
+			Value: &openapi3.Schema{},
+		},
+	}
 	param := restfulParam.Data()
 	p.In = asParamType(param.Kind)
 
 	if param.AllowMultiple {
 		// If the param is an array apply the validations to the items in it
-		p.Type = arrayType
-		p.Items = spec.NewItems()
-		p.Items.Type = param.DataType
-		p.Items.Pattern = param.Pattern
-		p.Items.MinLength = param.MinLength
-		p.Items.MaxLength = param.MaxLength
-		p.CollectionFormat = param.CollectionFormat
-		p.MinItems = param.MinItems
-		p.MaxItems = param.MaxItems
-		p.UniqueItems = param.UniqueItems
+		p.Schema.Value.Type = arrayType
+		p.Schema.Value.MinItems = int64P2uint64(param.MinItems)
+		p.Schema.Value.MaxItems = int64P2uint64P(param.MaxItems)
+		p.Schema.Value.UniqueItems = param.UniqueItems
+		p.Schema.Value.Items = &openapi3.SchemaRef{
+			Value: &openapi3.Schema{},
+		}
+		p.Schema.Value.Items.Value.Type = param.DataType
+		p.Schema.Value.Items.Value.Pattern = param.Pattern
+		p.Schema.Value.Items.Value.MinLength = int64P2uint64(param.MinLength)
+		p.Schema.Value.Items.Value.MaxLength = int64P2uint64P(param.MaxLength)
+		switch restful.CollectionFormat(param.CollectionFormat) {
+		case restful.CollectionFormatCSV:
+			p.Style = openapi3.SerializationSimple
+		case restful.CollectionFormatSSV:
+			p.Style = openapi3.SerializationSpaceDelimited
+		case restful.CollectionFormatTSV:
+			// There is no drop in replacement for TSV format
+			p.Style = openapi3.SerializationSpaceDelimited
+		case restful.CollectionFormatPipes:
+			p.Style = openapi3.SerializationPipeDelimited
+		case restful.CollectionFormatMulti:
+			p.Style = openapi3.SerializationForm
+			t := true
+			p.Explode = &t
+		}
 	} else {
-		// Otherwise for non-arrays apply the validations directly to the param
-		p.Type = param.DataType
-		p.MinLength = param.MinLength
-		p.MaxLength = param.MaxLength
-		p.Minimum = param.Minimum
-		p.Maximum = param.Maximum
+		// Otherwise, for non-arrays apply the validations directly to the param
+		p.Schema.Value.Type = param.DataType
+		p.Schema.Value.MinLength = int64P2uint64(param.MinLength)
+		p.Schema.Value.MaxLength = int64P2uint64P(param.MaxLength)
+		p.Schema.Value.Min = param.Minimum
+		p.Schema.Value.Max = param.Maximum
 	}
 
 	if numAllowable := len(param.AllowableValues); numAllowable > 0 {
@@ -188,9 +193,9 @@ func buildParameter(r restful.Route, restfulParam *restful.Parameter, pattern st
 		sort.Strings(allowableSortedKeys)
 
 		// init Enum to our known size and populate it
-		p.Enum = make([]interface{}, 0, numAllowable)
+		p.Schema.Value.Enum = make([]interface{}, 0, numAllowable)
 		for _, key := range allowableSortedKeys {
-			p.Enum = append(p.Enum, param.AllowableValues[key])
+			p.Schema.Value.Enum = append(p.Schema.Value.Enum, param.AllowableValues[key])
 		}
 	}
 
@@ -200,9 +205,9 @@ func buildParameter(r restful.Route, restfulParam *restful.Parameter, pattern st
 	p.AllowEmptyValue = param.AllowEmptyValue
 
 	if param.Kind == restful.PathParameterKind {
-		p.Pattern = pattern
+		p.Schema.Value.Pattern = pattern
 	} else if !param.AllowMultiple {
-		p.Pattern = param.Pattern
+		p.Schema.Value.Pattern = param.Pattern
 	}
 	st := reflect.TypeOf(r.ReadSample)
 	if param.Kind == restful.BodyParameterKind && r.ReadSample != nil && param.DataType == st.String() {
@@ -359,4 +364,25 @@ func jsonSchemaType(modelName string) string {
 		return modelName // use as is (custom or struct)
 	}
 	return mapped
+}
+
+func int64P2uint64(v *int64) uint64 {
+	if v == nil {
+		return 0
+	}
+	if *v < 0 {
+		return 0
+	}
+	return uint64(*v)
+}
+
+func int64P2uint64P(v *int64) *uint64 {
+	if v == nil {
+		return nil
+	}
+	if *v < 0 {
+		return nil
+	}
+	u := uint64(*v)
+	return &u
 }

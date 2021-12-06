@@ -1,12 +1,13 @@
 package restfulspec
 
 import (
-	restful "github.com/emicklei/go-restful/v3"
+	"github.com/emicklei/go-restful/v3"
+	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/go-openapi/spec"
 )
 
 // NewOpenAPIService returns a new WebService that provides the API documentation of all services
-// conform the OpenAPI documentation specifcation.
+// conform the OpenAPI documentation specification.
 func NewOpenAPIService(config Config) *restful.WebService {
 
 	ws := new(restful.WebService)
@@ -16,28 +17,28 @@ func NewOpenAPIService(config Config) *restful.WebService {
 		ws.Filter(enableCORS)
 	}
 
-	swagger := BuildSwagger(config)
+	swagger := BuildOpenAPI(config)
 	resource := specResource{swagger: swagger}
 	ws.Route(ws.GET("/").To(resource.getSwagger))
 	return ws
 }
 
-// BuildSwagger returns a Swagger object for all services' API endpoints.
-func BuildSwagger(config Config) *spec.Swagger {
-	// collect paths and model definitions to build Swagger object.
-	paths := &spec.Paths{Paths: map[string]spec.PathItem{}}
-	definitions := spec.Definitions{}
+// BuildOpenAPI returns a OpenAPI v3 object for all services' API endpoints.
+func BuildOpenAPI(config Config) *openapi3.T {
+	// collect paths and model definitions to build OpenAPI object.
+	paths := openapi3.Paths{}
+	schemas := openapi3.Schemas{}
 
 	for _, each := range config.WebServices {
 		for path, item := range buildPaths(each, config).Paths {
-			existingPathItem, ok := paths.Paths[path]
+			existingPathItem, ok := paths[path]
 			if ok {
 				for _, r := range each.Routes() {
 					_, patterns := sanitizePath(r.Path)
 					item = buildPathItem(each, r, existingPathItem, patterns, config)
 				}
 			}
-			paths.Paths[path] = item
+			paths[path] = item
 		}
 		for name, def := range buildDefinitions(each, config) {
 			definitions[name] = def
